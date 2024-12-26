@@ -12,6 +12,7 @@
 """
 This script evaluates plan generation using openAI LLMs
 for the VirtualHome environment tasks
+virtualhome simul 상태에서 plan 생성
 """
 
 import sys
@@ -33,6 +34,8 @@ import time
 
 from utils_execute import *
 
+
+#얘는 결과가 어케 나왔는지 오차율 느낌으로 구하는 함수
 def eval(final_states, 
          final_states_GT, 
          initial_states, 
@@ -45,32 +48,63 @@ def eval(final_states,
     ## for example "turn off lightswitch" could happen in multiple locations
     ## the evaluation happens w.r.t one possible valid state
     ## that the annotator provides
-
-    sr = []
+    ## GT는 ground truth인듯
+    sr = [] 
     unsatif_conds = []; unchanged_conds = []
     total_goal_conds = []; total_unchanged_conds = []
     results = {}
+    #zip : 동일 인덱스 튜플로 묶은 iterator 반환
     for g, g_gt, g_in, d in zip(final_states, final_states_GT, initial_states, test_tasks):
-        obj_ids = dict([(node['id'], node['class_name']) for node in g_in['nodes']])
+        '''
+        g:final_states
+        g_gt:final_states_GT
+        g_in:initial_states
+        d:test_tasks        
+        '''
+        #initial_state 정리
+        obj_ids = dict([(node['id'], node['class_name']) for node in g_in['nodes']]) 
+        # initial_state['nodes']을 순회하면서 그거의 id와 class_name을 튜플 후 dict로 저장함
+        # (initial_state) id : class name
         relations_in = set([obj_ids[n['from_id']] +' '+ n["relation_type"] +' '+ obj_ids[n['to_id']] for n in g_in["edges"]])
+        # (initial_state) 'from_id relation_type to_id'형태로 중복된 거 제거된 상태로 저장함(집합)
         obj_states_in = set([node['class_name'] + ' ' + st for node in g_in['nodes'] for st in node['states']])
+        # (initial_state)의 'nodes'에 있는 'state'를 돌면서 집합으로 'node['class_name'] node['states']'를 저장함
         
+        #final _state 정리
         obj_ids = dict([(node['id'], node['class_name']) for node in g['nodes']])
         relations = set([obj_ids[n['from_id']] +' '+ n["relation_type"] +' '+ obj_ids[n['to_id']] for n in g["edges"]])
         obj_states = set([node['class_name'] + ' ' + st for node in g['nodes'] for st in node['states']])
 
+        #final_state_GT 정리
         obj_ids = dict([(node['id'], node['class_name']) for node in g_gt['nodes']])
         relations_gt = set([obj_ids[n['from_id']] +' '+ n["relation_type"] +' '+ obj_ids[n['to_id']] for n in g_gt["edges"]])
         obj_states_gt = set([node['class_name'] + ' ' + st for node in g_gt['nodes'] for st in node['states']])
 
-        log_file.write(f"\nunsatisfied state conditions: relations: {(relations_gt - relations_in) - (relations - relations_in)}, object states: {(obj_states_gt - obj_states_in) - (obj_states - obj_states_in)}")
-        unsatif_conds.append((len((relations_gt - relations_in) - (relations - relations_in))+len((obj_states_gt - obj_states_in) - (obj_states - obj_states_in))))
-        total_goal_conds.append(len(relations_gt - relations_in)+len(obj_states_gt - obj_states_in))
-        sr.append(1-unsatif_conds[-1]/total_goal_conds[-1])
 
+
+        log_file.write(f"\nunsatisfied state conditions: relations: {(relations_gt - relations_in) - (relations - relations_in)}, object states: {(obj_states_gt - obj_states_in) - (obj_states - obj_states_in)}")
+        '''
+            unsatisfied state conditions: 
+                relations: {(relations_gt - relations_in) - (relations - relations_in)},
+                object states: {(obj_states_gt - obj_states_in) - (obj_states - obj_states_in)}
+
+            이런 형태로 저장하겠다는건데  finalstate 나 finalstate_GT의 관계나 상태가 초기값에 없으면 안되니깐
+            그 없는 값들을 log_file 에 저장하겠다는거
+        '''
+        unsatif_conds.append((len((relations_gt - relations_in) - (relations - relations_in))+len((obj_states_gt - obj_states_in) - (obj_states - obj_states_in))))
+        ## 로그파일에 적은대로 만족 못시키는 애들 개수 추가하기
+        ## (기준goal-initial)-(결과-initial) 느낌인뎅 겹치는걸 제외한건가?
+        total_goal_conds.append(len(relations_gt - relations_in)+len(obj_states_gt - obj_states_in))
+        ## 기준goal - 처음상태
+        sr.append(1-unsatif_conds[-1]/total_goal_conds[-1])
+        ## satisfaction rate
+        ## 가장 최근값 기준으로 1-못만족/목표 즉 만족시키는 비율을 찾겠다는 뜻
         unchanged_conds.append((len(relations_gt.intersection(relations_in) - relations)+len(obj_states_gt.intersection(obj_states_in) - obj_states)))
+        ## 교집합 찾아서 안변한 것들 넣기 final_state가 교집합에 있으면 제외해주기
         total_unchanged_conds.append(len(relations_gt.intersection(relations_in))+len(obj_states_gt.intersection(obj_states_in)))
+        ## 얜 gt와 initial의 교집합만 봄
         
+        #결과값 출력
         results[d] = {'PSR': sr[-1],
                         "SR": sr[-1:].count(1.0),
                         "Precision": 1-unchanged_conds[-1]/total_unchanged_conds[-1],
@@ -85,6 +119,7 @@ def eval(final_states,
                             }
     return results
 
+
 def planner_executer(args):
 
     # initialize env
@@ -96,13 +131,58 @@ def planner_executer(args):
     comm.reset(0)
 
     _, env_graph = comm.environment_graph()
-    obj = list(set([node['class_name'] for node in env_graph["nodes"]]))
+    ## response['success'], json.loads(response['message'])
+    ## return: pair success (bool), graph: (dictionary)
+    ## current state에 대해 environment graph를 반환
+    '''
+    이런식으로 되어있음
+    {
+   "nodes":[
+      {
+         "id":1,
+         "class_name":"character",
+         "states":[ 얘는 open/closed/on/onff
 
-    # define available actions and append avaailable objects from the env
-    prompt = f"from actions import turnright, turnleft, walkforward, walktowards <obj>, walk <obj>, run <obj>, grab <obj>, switchon <obj>, switchoff <obj>, open <obj>, close <obj>, lookat <obj>, sit <obj>, standup, find <obj>, turnto <obj>, drink <obj>, pointat <obj>, watch <obj>, putin <obj> <obj>, putback <obj> <obj>"
+         ],
+         "properties":[ 얘는 뭐 obj가 행동을 할 수 있는지
+
+         ],
+         "category":"Person"
+      },
+      {
+         "id":2,
+         "class_name":"kitchen",
+         "states":[
+
+         ],
+         "properties":[
+
+         ],
+         "category":"Room"
+      }
+   ],
+   "edges":[
+      {
+         "from_id":1,
+         "to_id":2,
+         "relation_type":"INSIDE"
+      }
+   ]
+   '''
+    obj = list(set([node['class_name'] for node in env_graph["nodes"]]))
+    ## 그래프의 node의 class_name을 중복 제거하고 list로 저장
+    ## 현재 환경에 있는 물건들임
+
+    # define available actions and append available objects from the env
+    ## 가능한 actions과 사용할 수 있는 obj 전달할거임
+    prompt = f"from actions import turnright, turnleft, walkforward, walktowards <obj>, walk <obj>, 
+                run <obj>, grab <obj>, switchon <obj>, switchoff <obj>, open <obj>, close <obj>, lookat <obj>, 
+                sit <obj>, standup, find <obj>, turnto <obj>, drink <obj>, pointat <obj>, watch <obj>, 
+                putin <obj> <obj>, putback <obj> <obj>"
     prompt += f"\n\nobjects = {obj}"
 
     # load train split for task examples
+    ## 뭐 wash_clothes면 미리 저장되어 있는 이거의 plan을 prompt_egs에 dict 형태로 넣음
     with open(f"{args.progprompt_path}/data/pythonic_plans/train_complete_plan_set.json", 'r') as f:
         tmp = json.load(f)
         prompt_egs = {}
@@ -123,8 +203,10 @@ def planner_executer(args):
                             "put_apple_in_fridge"]
         for i in range(args.prompt_num_examples):
             prompt += "\n\n" + prompt_egs[default_examples[i]]
+            ## 명령할 task를 default로 설정한다면 default examples의 미리 정해진 plan을 prompt 로 전달함
 
     # random egs - change seeds
+    ## random으로 지정하면 random으로 task 넘김
     if args.prompt_task_examples == "random":
         random.seed(args.seed)
         prompt_egs_keys = random.sample(list(prompt_egs.keys()), args.prompt_num_examples)
@@ -133,23 +215,34 @@ def planner_executer(args):
             prompt += "\n\n" + prompt_egs[eg]
 
     # abalation settings
+    ## 얘는 옵션인듯
+    ## prompt에서 주석 제거
     if args.prompt_task_examples_ablation == "no_comments":
         prompt = prompt.split('\n')
         prompt = [line for line in prompt if "# " not in line]
         prompt  = "\n".join(prompt)
 
+    ## prompt에서 assert 문 제거
     if args.prompt_task_examples_ablation == "no_feedback":
         prompt = prompt.split('\n')
         prompt = [line for line in prompt if not any([x in line for x in ["assert", "else"]])]
         prompt  = "\n".join(prompt)
 
+    ## prompt에서 둘 다 제거
     if args.prompt_task_examples_ablation == "no_comments_feedback":
         prompt = prompt.split('\n')
         prompt = [line for line in prompt if not any([x in line for x in ["assert", "else", "# "]])]
         prompt  = "\n".join(prompt)
 
 
+    ## 여기까지는 prompt에 0으로 초기화 된 환경에 할 수 있는 행동, 있는 obj, 예시의 미리 정해진 plan 넣어줬음.
+    
+    ##################
+
+    ## 평가 구문. 기존환경/새로운 환경 나뉘어져있음
     # evaluate in given unseen env
+    ## virtualhome 에서 env_id가 있음. 방 구조 다름
+    ## 새로운 환경(unseen)에 대한 obj prompt에 추가
     if args.env_id != 0:
         comm.reset(args.env_id)
         _, graph = comm.environment_graph()
@@ -182,20 +275,20 @@ def planner_executer(args):
         log_file.write(f"\n----Test set tasks----\n{test_tasks}\nTotal: {len(test_tasks)} tasks\n")
 
     # test_tasks = test_tasks[:3] ## debug to check changes
-
+    ## prompt에 0으로 초기화 된 환경에 할 수 있는 행동, 있는 obj, 예시의 미리 정해진 plan, unseen에 대한 object를 넣어줌
     # generate plans for the test set
     if not args.load_generated_plans:
         gen_plan = []
         for task in test_tasks:
             print(f"Generating plan for: {task}\n")
-            prompt_task = "def {fxn}():".format(fxn = '_'.join(task.split(' ')))
-            curr_prompt = f"{prompt}\n\n{prompt_task}\n\t"
+            prompt_task = "def {fxn}():".format(fxn = '_'.join(task.split(' '))) # task _로 이어져있는거 공백으로 잇기
+            curr_prompt = f"{prompt}\n\n{prompt_task}\n\t" ## 주어진 정보 + 수행할 task 이어서 prompt 만듦
             _, text = LM(curr_prompt, 
                         args.gpt_version, 
                         max_tokens=600, 
                         stop=["def"], 
                         frequency_penalty=0.15)
-            gen_plan.append(text)
+            gen_plan.append(text) # 답장온거 저장
             # because codex has query limit per min
             if args.gpt_version == 'code-davinci-002':
                 time.sleep(90)
